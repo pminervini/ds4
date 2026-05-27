@@ -1271,6 +1271,13 @@ static bool structured_json_is_ws(char c) {
     return c == ' ' || c == '\n' || c == '\r' || c == '\t';
 }
 
+static bool structured_json_bytes_all_ws(const char *p, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (!structured_json_is_ws(p[i])) return false;
+    }
+    return true;
+}
+
 static bool structured_skip_ws_prefix(const char *s, size_t len, size_t *pos) {
     while (*pos < len && structured_json_is_ws(s[*pos])) (*pos)++;
     return *pos < len;
@@ -9299,6 +9306,15 @@ static int server_sample_logits(const float *logits,
     return ids[filtered - 1];
 }
 
+static bool structured_should_mask_leading_ws(const buf *text,
+                                              const char *piece,
+                                              size_t piece_len) {
+    if (!piece || piece_len == 0) return false;
+    if (!structured_json_bytes_all_ws(piece, piece_len)) return false;
+    if (!text || text->len == 0) return true;
+    return structured_json_bytes_all_ws(text->ptr, text->len);
+}
+
 static int structured_sample_token(server *srv,
                                    structured_decoder *decoder,
                                    buf *text,
@@ -9342,6 +9358,10 @@ static int structured_sample_token(server *srv,
         const char *piece = srv->structured_token_text[i];
         const size_t piece_len = srv->structured_token_len[i];
         if (!piece || piece_len == 0) {
+            srv->structured_logits[i] = STRUCTURED_MASK_LOGIT;
+            continue;
+        }
+        if (structured_should_mask_leading_ws(text, piece, piece_len)) {
             srv->structured_logits[i] = STRUCTURED_MASK_LOGIT;
             continue;
         }
@@ -14841,6 +14861,17 @@ static void test_structured_decoder_rejects_non_json_whitespace(void) {
     structured_decoder_free(&decoder);
 }
 
+static void test_structured_sampler_masks_leading_ws_prefix(void) {
+    buf b = {0};
+    TEST_ASSERT(structured_should_mask_leading_ws(&b, "\n\t", 2));
+    buf_puts(&b, "\n ");
+    TEST_ASSERT(structured_should_mask_leading_ws(&b, "\t", 1));
+    buf_putc(&b, '{');
+    TEST_ASSERT(!structured_should_mask_leading_ws(&b, " ", 1));
+    TEST_ASSERT(!structured_should_mask_leading_ws(&b, "\"x\"", 3));
+    buf_free(&b);
+}
+
 static void test_dsml_tool_args_preserve_call_order(void) {
     tool_calls calls = make_swapped_bash_call();
     buf b = {0};
@@ -17327,6 +17358,7 @@ static void ds4_server_unit_tests_run(void) {
     test_parse_chat_response_format_rejects_missing_schema();
     test_structured_decoder_preserves_enum_after_type();
     test_structured_decoder_rejects_non_json_whitespace();
+    test_structured_sampler_masks_leading_ws_prefix();
     test_tool_schema_order_from_anthropic_schema();
     test_tool_schema_order_from_openai_tools();
     test_tool_schema_order_from_responses_tool_search();
